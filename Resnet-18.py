@@ -4,7 +4,7 @@ import torchvision.transforms as transforms
 from torchvision import datasets
 from torch.utils.data import DataLoader, Subset
 import torch.optim as optim
-from torch.optim.lr_scheduler import LambdaLR, MultiStepLR
+from torch.optim.lr_scheduler import LambdaLR, CosineAnnealingLR
 
 def main():
 
@@ -15,8 +15,10 @@ def main():
 
     train_tf = transforms.Compose([transforms.RandomCrop(32,padding=4),
                                transforms.RandomHorizontalFlip(),
+                               transforms.RandAugment(num_ops=2, magnitude=9),
                                transforms.ToTensor(),
-                               transforms.Normalize(mean,std)])
+                               transforms.Normalize(mean,std),
+                               transforms.RandomErasing(p=0.25)])
     test_tf = transforms.Compose([transforms.ToTensor(),
                               transforms.Normalize(mean,std)])
 
@@ -44,7 +46,7 @@ def main():
                         num_workers=num_workers,pin_memory=pin)
     test_loader = DataLoader(base_val,batch_size=batch_size,shuffle=False,
                          num_workers=num_workers,pin_memory=pin)
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
 
     class BasicBlock(nn.Module):
         def __init__(self, in_ch, out_ch, stride=1):
@@ -135,11 +137,9 @@ def main():
             {"params": no_decay, "weight_decay": 0.0},
         ]
 
-    epochs         = 200
-    warm_epochs    = 1                    
-    weight_decay   = 5e-4
-    milestones     = [60, 120, 160]     
-    gamma          = 0.2
+    epochs         = 300
+    warm_epochs    = 5                  
+    weight_decay   = 2e-4
 
     global_batch   = batch_size
     base_lr        = 0.1 * (global_batch / 256) 
@@ -150,15 +150,21 @@ def main():
     )
 
     iters_per_epoch     = len(train_loader)
-    warmup_total_steps  = max(1, warm_epochs * iters_per_epoch)
+    warmup_total_steps  = warm_epochs * iters_per_epoch
 
-    def warmup_factor(step):
-    #
-        return float(step + 1) / warmup_total_steps if step < warmup_total_steps else 1.0
+    def warmup_lambda(step: int):
 
-    warmup_scheduler = LambdaLR(optimizer, lr_lambda=warmup_factor)
+        if step < warmup_total_steps:
+            return float(step + 1) / float(max(1, warmup_total_steps))
+        return 1.0
 
-    main_scheduler = MultiStepLR(optimizer, milestones=milestones, gamma=gamma)
+    warmup_scheduler = LambdaLR(optimizer, lr_lambda=warmup_lambda)
+    cosine_scheduler = CosineAnnealingLR(
+    optimizer,
+    T_max=epochs - warm_epochs,      
+    eta_min=base_lr * 1e-2           
+    )
+    
 
     use_amp = (device.type == "cuda")
     amp_dtype = torch.float16
@@ -197,12 +203,12 @@ def main():
             correct += (predicted == labels).sum().item()
 
         if epoch > warm_epochs:
-            main_scheduler.step()
+            cosine_scheduler.step()
 
         epoch_loss = running_loss / len(train_loader)
         epoch_acc  = 100.0 * correct / total
         cur_lr = optimizer.param_groups[0]['lr']
-        torch.save(model.state_dict(), "last.pth")
+        torch.save(model.state_dict(), "last2.pth")
         print(f"[train] epoch {epoch:03d} | lr={cur_lr:.5f} | loss={epoch_loss:.4f} | acc={epoch_acc:.2f}%")
     
     model.eval()
